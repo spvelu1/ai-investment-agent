@@ -71,8 +71,8 @@ def construct(
     if not symbols:
         return {}
 
-    # Vol-adjusted sizing
-    weights = _vol_adjusted_weights(selected, symbols, cfg)
+    # Score-proportional sizing
+    weights = _score_weighted(selected, symbols, cfg)
 
     logger.info(
         "Portfolio constructed: %d positions | macro=%.1f",
@@ -85,22 +85,17 @@ def construct(
     return weights
 
 
-def _vol_adjusted_weights(df: pd.DataFrame, symbols: list[str], cfg) -> dict[str, float]:
-    """
-    1/vol weighting normalized to sum to 1, capped at max_position_pct.
-    Falls back to equal weight if vol data missing.
-    """
-    vols = df.loc[symbols, "vol_20d"] if "vol_20d" in df.columns else pd.Series(dtype=float)
+def _score_weighted(df: pd.DataFrame, symbols: list[str], cfg) -> dict[str, float]:
+    """Weight proportional to master_score — top-ranked stocks get more capital."""
+    scores = df.loc[symbols, "master_score"] if "master_score" in df.columns else pd.Series(dtype=float)
 
-    if vols.isna().all() or vols.empty:
+    if scores.isna().all() or scores.empty:
         w = {sym: 1.0 / len(symbols) for sym in symbols}
     else:
-        vols = vols.fillna(vols.median()).clip(lower=1e-6)
-        inv_vol = 1.0 / vols
-        total = inv_vol.sum()
-        w = (inv_vol / total).to_dict()
+        scores = scores.fillna(scores.median()).clip(lower=0)
+        total = scores.sum()
+        w = (scores / total).to_dict() if total > 0 else {sym: 1.0 / len(symbols) for sym in symbols}
 
-    # Apply position cap iteratively
     w = _apply_position_cap(w, cfg.max_position_pct)
     return w
 
