@@ -101,20 +101,20 @@ class Executor:
             if price and price > 0:
                 target_shares[sym] = math.floor(portfolio_value * weight / price)
 
-        # Sells: trim oversized carry-overs — only if drift exceeds threshold
+        # Sells: trim oversized carry-overs — high threshold, let winners run
         for sym in target_symbols & current_symbols:
             drift = current_weights.get(sym, 0) - target_weights.get(sym, 0)
-            if drift < cfg.drift_threshold:
+            if drift < cfg.sell_drift_threshold:
                 continue
             delta = float(current_map[sym]["qty"]) - target_shares.get(sym, 0)
             if delta >= 1:
                 self._submit_order(sym, delta, "sell", "rebalance_trim")
 
-        # Buys: new positions and meaningfully undersized ones
+        # Buys: rotate quickly into new opportunities — low threshold
         for sym in sorted(target_symbols, key=lambda s: target_weights.get(s, 0), reverse=True):
             current_qty = float(current_map[sym]["qty"]) if sym in current_map else 0.0
             drift = target_weights.get(sym, 0) - current_weights.get(sym, 0)
-            if sym in current_symbols and drift < cfg.drift_threshold:
+            if sym in current_symbols and drift < cfg.buy_drift_threshold:
                 continue
             delta = target_shares.get(sym, 0) - current_qty
             if delta >= 1:

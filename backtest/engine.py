@@ -408,23 +408,24 @@ def _execute_rebalance(
     }
 
     # ── Step 3: Trim carry-over positions that are oversized ─────────────────
-    # Skip if weight drift is below threshold — not worth the slippage cost.
+    # High threshold — don't cut winners for small drifts, let them run.
     for sym in current_syms & target_syms:
         if sym not in portfolio.positions:
             continue
         drift = current_weights.get(sym, 0) - target_weights.get(sym, 0)
-        if drift < cfg.drift_threshold:
+        if drift < cfg.sell_drift_threshold:
             continue
         delta = int(portfolio.positions[sym]["qty"]) - target_shares.get(sym, 0)
         if delta >= 1 and prices.get(sym, 0) > 0:
             portfolio.fill(sym, "sell", delta, prices[sym], trade_date, "rebalance_trim")
 
     # ── Step 4: Buy new or undersized positions (highest weight first) ────────
+    # Low threshold — rotate quickly into new high-scoring opportunities.
     for sym in sorted(target_syms, key=lambda s: target_weights.get(s, 0), reverse=True):
         current_qty = int(portfolio.positions.get(sym, {}).get("qty", 0))
         drift = target_weights.get(sym, 0) - current_weights.get(sym, 0)
-        if sym in current_syms and drift < cfg.drift_threshold:
-            continue  # already close enough to target weight
+        if sym in current_syms and drift < cfg.buy_drift_threshold:
+            continue
         delta = target_shares.get(sym, 0) - current_qty
         if delta >= 1 and prices.get(sym, 0) > 0:
             portfolio.fill(sym, "buy", delta, prices[sym], trade_date, "rebalance_add")
