@@ -73,43 +73,50 @@ class Executor:
             logger.warning("Portfolio value is 0 — skipping rebalance")
             return
 
+        cfg = get_settings()
         current_map = {p["symbol"]: p for p in current_positions}
         target_symbols = set(target_weights.keys())
         current_symbols = set(current_map.keys())
 
-        # Sells: symbols no longer in target
-        exits = current_symbols - target_symbols
-        for sym in exits:
-            pos = current_map[sym]
-            qty = float(pos["qty"])
+        # Current weights by market value
+        current_weights: dict[str, float] = {
+            sym: float(pos["market_value"]) / portfolio_value
+            for sym, pos in current_map.items()
+        } if portfolio_value > 0 else {}
+
+        # Sells: symbols no longer in target (clear opportunity cost — always exit)
+        for sym in current_symbols - target_symbols:
+            qty = float(current_map[sym]["qty"])
             if qty > 0:
                 self._submit_order(sym, qty, "sell", "removed_from_portfolio")
 
         # Compute target shares for each position
         target_shares: dict[str, float] = {}
         for sym, weight in target_weights.items():
-            target_value = portfolio_value * weight
-            # Use last known price from Alpaca position or approximate
-            if sym in current_map:
-                price = float(current_map[sym]["current_price"])
-            else:
-                price = self._get_last_price(sym)
+            price = (
+                float(current_map[sym]["current_price"])
+                if sym in current_map
+                else self._get_last_price(sym)
+            )
             if price and price > 0:
-                target_shares[sym] = math.floor(target_value / price)
+                target_shares[sym] = math.floor(portfolio_value * weight / price)
 
-        # Sells: reduce oversized positions
+        # Sells: trim oversized carry-overs — only if drift exceeds threshold
         for sym in target_symbols & current_symbols:
-            current_qty = float(current_map[sym]["qty"])
-            desired_qty = target_shares.get(sym, 0)
-            delta = current_qty - desired_qty
+            drift = current_weights.get(sym, 0) - target_weights.get(sym, 0)
+            if drift < cfg.drift_threshold:
+                continue
+            delta = float(current_map[sym]["qty"]) - target_shares.get(sym, 0)
             if delta >= 1:
                 self._submit_order(sym, delta, "sell", "rebalance_trim")
 
-        # Buys: new positions and undersized ones
-        for sym in target_symbols:
+        # Buys: new positions and meaningfully undersized ones
+        for sym in sorted(target_symbols, key=lambda s: target_weights.get(s, 0), reverse=True):
             current_qty = float(current_map[sym]["qty"]) if sym in current_map else 0.0
-            desired_qty = target_shares.get(sym, 0)
-            delta = desired_qty - current_qty
+            drift = target_weights.get(sym, 0) - current_weights.get(sym, 0)
+            if sym in current_symbols and drift < cfg.drift_threshold:
+                continue
+            delta = target_shares.get(sym, 0) - current_qty
             if delta >= 1:
                 self._submit_order(sym, delta, "buy", "rebalance_add")
 
