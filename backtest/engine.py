@@ -158,7 +158,8 @@ class BacktestEngine:
             # Daily sell-rule check (skip day 0 — no positions yet)
             if last_signals_df is not None:
                 triggered = self._daily_check(
-                    d, portfolio, all_bars, last_signals_df, prices
+                    d, portfolio, all_bars, last_signals_df, prices,
+                    regime=current_regime,
                 )
                 for reason in triggered:
                     sell_reason_counts[reason] += 1
@@ -219,30 +220,33 @@ class BacktestEngine:
         all_bars: pd.DataFrame,
         signals_df: pd.DataFrame,
         prices: dict[str, float],
+        regime: str = "factor",
     ) -> list[str]:
         """Run sell rules. Returns list of triggered sell reasons."""
         positions = portfolio.get_positions_for_risk_manager()
         if not positions:
             return []
 
-        # Temporarily override below_50dma_days threshold in settings
         cfg = get_settings()
         orig_50dma_threshold = cfg.below_50dma_days
         orig_time_stop = cfg.max_holding_days
+        orig_stop_loss = cfg.stop_loss_pct
         if self.below_50dma_days is not None:
             cfg.below_50dma_days = self.below_50dma_days
         if self.disable_time_stop:
             cfg.max_holding_days = 9999
+        if regime == "concentrated":
+            cfg.stop_loss_pct = cfg.concentrated_stop_loss_pct
 
         try:
             symbols = [p["symbol"] for p in positions]
             bars = _slice_bars(all_bars, symbols, d, lookback_days=260)
             with _no_store_writes():
-                # signals_df has symbol as index — _get_symbol_signals works correctly
                 sell_signals = evaluate_risk(positions, bars, signals_df, as_of=d)
         finally:
             cfg.below_50dma_days = orig_50dma_threshold
             cfg.max_holding_days = orig_time_stop
+            cfg.stop_loss_pct = orig_stop_loss
 
         triggered: list[str] = []
         for sig in sell_signals:

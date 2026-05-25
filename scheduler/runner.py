@@ -25,10 +25,9 @@ logger = logging.getLogger(__name__)
 def run_daily_check() -> None:
     """
     Daily pre-market job (6:30 AM ET).
-    - Refresh macro regime
+    - Detect current regime → tighter stop-loss when concentrated
     - Pull latest bars for open positions
     - Evaluate and execute sell rules
-    - Persist updated signal scores
     """
     logger.info("=== DAILY CHECK starting ===")
     alpaca = AlpacaClient()
@@ -47,7 +46,22 @@ def run_daily_check() -> None:
     # Latest signals for RS + revision checks
     signals_df = store.read_signals()
 
-    sell_signals = evaluate_risk(stored_positions, bars, signals_df)
+    # Apply tighter stop-loss when in concentrated AI mode
+    cfg = get_settings()
+    regime_data = compute_regime()
+    regime = regime_data["regime"]
+    logger.info("Daily check regime: %s (composite=%.1f)", regime.upper(), regime_data["composite_score"])
+
+    orig_stop_loss = cfg.stop_loss_pct
+    if regime == "concentrated":
+        cfg.stop_loss_pct = cfg.concentrated_stop_loss_pct
+        logger.info("Stop-loss tightened to %.0f%% (concentrated mode)", cfg.stop_loss_pct * 100)
+
+    try:
+        sell_signals = evaluate_risk(stored_positions, bars, signals_df)
+    finally:
+        cfg.stop_loss_pct = orig_stop_loss
+
     if sell_signals:
         logger.info("Sell signals: %s", [(s.symbol, s.action, s.reason) for s in sell_signals])
         executor = Executor(alpaca)

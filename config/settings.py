@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     # Concentrated AI regime portfolio
     concentrated_n_positions: int = 7        # top N AI names when in concentrated mode
     concentrated_max_position_pct: float = 0.22  # higher concentration allowed vs factor mode
+    concentrated_stop_loss_pct: float = 0.05  # tighter stop in AI mode (5% vs 8% in factor)
 
     # Macro de-risking
     macro_derisking_threshold: float = 40.0  # go to cash if macro score < 40
