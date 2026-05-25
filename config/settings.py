@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     macro_derisking_threshold: float = 40.0  # go to cash if macro score < 40
     vix_threshold: float = 25.0
 
+    # Email reporting (Gmail SMTP)
+    # Create an App Password at: https://myaccount.google.com/apppasswords
+    email_from: str = Field("", description="Gmail address to send from")
+    email_to: str = Field("spvelu@gmail.com", description="Recipient email address")
+    gmail_app_password: str = Field("", description="Gmail App Password (16-char, no spaces)")
+
     # DuckDB storage
     db_path: str = "data/market.db"
 

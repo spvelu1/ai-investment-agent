@@ -246,6 +246,37 @@ def cmd_status(_args) -> None:
     print()
 
 
+def cmd_report(_args) -> None:
+    """Fetch live status and send a formatted email report via Gmail SMTP."""
+    from data.clients.alpaca_client import AlpacaClient
+    from config.settings import get_settings
+    from notifications.email import send_daily_report
+
+    cfg = get_settings()
+    alpaca = AlpacaClient()
+    account = alpaca.get_account()
+    positions = alpaca.get_positions()
+
+    # Print to stdout as well (useful for cloud routine logs)
+    print(f"\n=== Daily Report ({date.today()}) ===")
+    for k, v in account.items():
+        print(f"  {k}: ${v:,.2f}")
+    if positions:
+        total_pnl = sum(p["unrealized_pl"] for p in positions)
+        print(f"  Open positions: {len(positions)}  |  Total Unrealized P&L: ${total_pnl:+,.2f}")
+    else:
+        print("  No open positions (all cash)")
+
+    send_daily_report(
+        account=account,
+        positions=positions,
+        email_from=cfg.email_from,
+        email_to=cfg.email_to,
+        app_password=cfg.gmail_app_password,
+    )
+    print(f"\nReport emailed to {cfg.email_to}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AI Investment Agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -258,6 +289,7 @@ def main() -> None:
     sig_parser.add_argument("--top", type=int, default=30, help="Rows to display")
 
     sub.add_parser("status", help="Print current positions and account")
+    sub.add_parser("report", help="Fetch status and email daily report to configured address")
 
     bt_parser = sub.add_parser("backtest", help="Run walk-forward backtest on historical data")
     bt_parser.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
@@ -294,6 +326,7 @@ def main() -> None:
         "daily": cmd_daily,
         "signals": cmd_signals,
         "status": cmd_status,
+        "report": cmd_report,
         "backtest": cmd_backtest,
     }
     commands[args.command](args)
