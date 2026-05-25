@@ -60,14 +60,6 @@ def construct(
         logger.warning("No stocks pass all hard filters — staying in cash")
         return {}
 
-    # Continuity bonus: incumbent positions aren't replaced unless the new
-    # candidate's score is clearly superior (not just marginally better).
-    if current_positions:
-        current_syms = {p["symbol"] for p in current_positions}
-        incumbent_mask = eligible.index.isin(current_syms)
-        eligible.loc[incumbent_mask, "master_score"] += cfg.continuity_bonus
-        eligible = eligible.sort_values("master_score", ascending=False)
-
     # Enforce sector cap: remove lowest-ranked names in overweight sectors
     eligible = _enforce_sector_cap(eligible, sector_map, cfg.max_sector_pct, cfg.max_positions)
 
@@ -79,8 +71,8 @@ def construct(
     if not symbols:
         return {}
 
-    # Opportunity-proportional sizing
-    weights = _opportunity_weighted(selected, symbols, cfg)
+    # Score-proportional sizing
+    weights = _score_weighted(selected, symbols, cfg)
 
     logger.info(
         "Portfolio constructed: %d positions | macro=%.1f",
@@ -126,31 +118,16 @@ def construct_concentrated(
     return w
 
 
-def _opportunity_weighted(df: pd.DataFrame, symbols: list[str], cfg) -> dict[str, float]:
-    """
-    Weight by (excess score above the weakest pick)^1.5.
-
-    Raw master_scores are often bunched (e.g. 72–88), making simple
-    proportional weighting near-equal.  Shifting by the minimum and raising
-    to the 1.5 power amplifies the gap: the top-scoring stock gets
-    meaningfully more capital than the marginal 15th pick, without needing
-    an arbitrary rank scheme.
-    """
+def _score_weighted(df: pd.DataFrame, symbols: list[str], cfg) -> dict[str, float]:
+    """Weight proportionally to master_score — higher score gets more capital."""
     scores = df.loc[symbols, "master_score"] if "master_score" in df.columns else pd.Series(dtype=float)
 
     if scores.isna().all() or scores.empty:
         w = {sym: 1.0 / len(symbols) for sym in symbols}
     else:
-        scores = scores.reindex(symbols).fillna(scores.median())
-        spread = scores.max() - scores.min()
-        # Floor = 20% of score spread so lowest-ranked stock still gets meaningful weight
-        floor = spread * 0.20 if spread > 0 else 1.0
-        excess = (scores - scores.min() + floor).clip(lower=floor) ** 1.5
-        total = excess.sum()
-        if total <= 0:
-            w = {sym: 1.0 / len(symbols) for sym in symbols}
-        else:
-            w = (excess / total).to_dict()
+        scores = scores.reindex(symbols).fillna(scores.median()).clip(lower=0)
+        total = scores.sum()
+        w = (scores / total).to_dict() if total > 0 else {sym: 1.0 / len(symbols) for sym in symbols}
 
     w = _apply_position_cap(w, cfg.max_position_pct)
     return w

@@ -73,18 +73,11 @@ class Executor:
             logger.warning("Portfolio value is 0 — skipping rebalance")
             return
 
-        cfg = get_settings()
         current_map = {p["symbol"]: p for p in current_positions}
         target_symbols = set(target_weights.keys())
         current_symbols = set(current_map.keys())
 
-        # Current weights by market value
-        current_weights: dict[str, float] = {
-            sym: float(pos["market_value"]) / portfolio_value
-            for sym, pos in current_map.items()
-        } if portfolio_value > 0 else {}
-
-        # Sells: symbols no longer in target (clear opportunity cost — always exit)
+        # Exit positions no longer in target
         for sym in current_symbols - target_symbols:
             qty = float(current_map[sym]["qty"])
             if qty > 0:
@@ -101,24 +94,14 @@ class Executor:
             if price and price > 0:
                 target_shares[sym] = math.floor(portfolio_value * weight / price)
 
-        # Sells: trim oversized carry-overs — high threshold, let winners run
-        for sym in target_symbols & current_symbols:
-            drift = current_weights.get(sym, 0) - target_weights.get(sym, 0)
-            if drift < cfg.sell_drift_threshold:
-                continue
-            delta = float(current_map[sym]["qty"]) - target_shares.get(sym, 0)
-            if delta >= 1:
-                self._submit_order(sym, delta, "sell", "rebalance_trim")
-
-        # Buys: rotate quickly into new opportunities — low threshold
+        # Buy/rebalance all target positions (highest weight first)
         for sym in sorted(target_symbols, key=lambda s: target_weights.get(s, 0), reverse=True):
             current_qty = float(current_map[sym]["qty"]) if sym in current_map else 0.0
-            drift = target_weights.get(sym, 0) - current_weights.get(sym, 0)
-            if sym in current_symbols and drift < cfg.buy_drift_threshold:
-                continue
             delta = target_shares.get(sym, 0) - current_qty
             if delta >= 1:
                 self._submit_order(sym, delta, "buy", "rebalance_add")
+            elif delta <= -1:
+                self._submit_order(sym, abs(delta), "sell", "rebalance_trim")
 
     def _exit_all(self, current_positions: list[dict], reason: str) -> None:
         for pos in current_positions:

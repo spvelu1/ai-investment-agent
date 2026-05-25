@@ -48,11 +48,6 @@ class Settings(BaseSettings):
     max_holding_days: int = 40
     below_50dma_days: int = 2         # consecutive days below 50DMA → exit
 
-    # Rebalancing discipline — asymmetric thresholds
-    continuity_bonus: float = 2.0   # score-point bonus for incumbents — avoids rotation on near-ties
-    buy_drift_threshold: float = 0.02   # min drift (2%) to add/rotate into an opportunity
-    sell_drift_threshold: float = 0.06  # min drift (6%) to trim a winner — let good positions run
-
     # Concentrated AI regime portfolio
     concentrated_n_positions: int = 7        # top N AI names when in concentrated mode
     concentrated_max_position_pct: float = 0.22  # higher concentration allowed vs factor mode

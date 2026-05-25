@@ -377,7 +377,6 @@ def _execute_rebalance(
     prices: dict[str, float],
     trade_date: date,
 ) -> None:
-    cfg = get_settings()
     current_syms = set(portfolio.positions.keys())
     target_syms = set(target_weights.keys())
 
@@ -387,48 +386,28 @@ def _execute_rebalance(
             portfolio.fill(sym, "sell", qty, prices.get(sym, 0), trade_date, "macro_derisking")
         return
 
-    # ── Step 1: Exit positions no longer in target (clear opportunity cost) ───
+    # Exit positions no longer in target
     for sym in current_syms - target_syms:
         qty = int(portfolio.positions[sym]["qty"])
         if qty > 0 and prices.get(sym, 0) > 0:
             portfolio.fill(sym, "sell", qty, prices[sym], trade_date, "rebalance_exit")
 
-    # ── Step 2: Compute current weights and target shares ─────────────────────
+    # Compute target shares against current NAV
     portfolio_value = portfolio.nav(prices)
-    current_weights: dict[str, float] = {}
-    if portfolio_value > 0:
-        for sym, pos in portfolio.positions.items():
-            val = int(pos["qty"]) * prices.get(sym, 0)
-            current_weights[sym] = val / portfolio_value
-
     target_shares: dict[str, int] = {
         sym: math.floor(portfolio_value * w / prices[sym])
         for sym, w in target_weights.items()
         if prices.get(sym, 0) > 0
     }
 
-    # ── Step 3: Trim carry-over positions that are oversized ─────────────────
-    # High threshold — don't cut winners for small drifts, let them run.
-    for sym in current_syms & target_syms:
-        if sym not in portfolio.positions:
-            continue
-        drift = current_weights.get(sym, 0) - target_weights.get(sym, 0)
-        if drift < cfg.sell_drift_threshold:
-            continue
-        delta = int(portfolio.positions[sym]["qty"]) - target_shares.get(sym, 0)
-        if delta >= 1 and prices.get(sym, 0) > 0:
-            portfolio.fill(sym, "sell", delta, prices[sym], trade_date, "rebalance_trim")
-
-    # ── Step 4: Buy new or undersized positions (highest weight first) ────────
-    # Low threshold — rotate quickly into new high-scoring opportunities.
+    # Buy/rebalance all target positions (highest weight first)
     for sym in sorted(target_syms, key=lambda s: target_weights.get(s, 0), reverse=True):
         current_qty = int(portfolio.positions.get(sym, {}).get("qty", 0))
-        drift = target_weights.get(sym, 0) - current_weights.get(sym, 0)
-        if sym in current_syms and drift < cfg.buy_drift_threshold:
-            continue
         delta = target_shares.get(sym, 0) - current_qty
         if delta >= 1 and prices.get(sym, 0) > 0:
             portfolio.fill(sym, "buy", delta, prices[sym], trade_date, "rebalance_add")
+        elif delta <= -1 and prices.get(sym, 0) > 0:
+            portfolio.fill(sym, "sell", abs(delta), prices[sym], trade_date, "rebalance_trim")
 
 
 def _trading_dates(bars: pd.DataFrame, start: date, end: date) -> list[date]:
