@@ -5,3 +5,4 @@ __pycache__/
 data/market.db
 backtest/results/
 notebooks/.ipynb_checkpoints/
+.env
