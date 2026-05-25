@@ -85,6 +85,39 @@ def construct(
     return weights
 
 
+def construct_concentrated(
+    ai_scores_df: pd.DataFrame,
+    current_positions: list[dict],
+    cfg,
+) -> dict[str, float]:
+    """
+    Build a concentrated AI/mega-cap portfolio weighted by momentum score.
+    Used when regime detector signals mega-cap dominance.
+    """
+    if ai_scores_df is None or ai_scores_df.empty:
+        logger.warning("AI scores empty — staying in cash")
+        return {}
+
+    selected = ai_scores_df.head(cfg.concentrated_n_positions)
+    symbols = selected.index.tolist()
+
+    scores = selected["ai_score"].clip(lower=0)
+    total = scores.sum()
+    w = (scores / total).to_dict() if total > 0 else {s: 1.0 / len(symbols) for s in symbols}
+
+    w = _apply_position_cap(w, cfg.concentrated_max_position_pct)
+
+    logger.info(
+        "CONCENTRATED portfolio: %d AI positions | top=%s (%.1f%%)",
+        len(w),
+        symbols[0] if symbols else "N/A",
+        w.get(symbols[0], 0) * 100 if symbols else 0,
+    )
+    for sym, wt in sorted(w.items(), key=lambda x: -x[1]):
+        logger.info("  %s  %.2f%%", sym, wt * 100)
+    return w
+
+
 def _score_weighted(df: pd.DataFrame, symbols: list[str], cfg) -> dict[str, float]:
     """Weight proportional to master_score — top-ranked stocks get more capital."""
     scores = df.loc[symbols, "master_score"] if "master_score" in df.columns else pd.Series(dtype=float)

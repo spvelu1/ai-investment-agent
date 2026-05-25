@@ -17,10 +17,12 @@ from config.settings import get_settings
 from data.clients.alpaca_client import AlpacaClient
 from data.clients.fmp_client import FMPClient
 from data.clients.macro_client import _MACRO_TICKERS
-from portfolio.constructor import construct, build_sector_map
+from portfolio.constructor import construct, construct_concentrated, build_sector_map
 from portfolio.risk_manager import evaluate as evaluate_risk
 from signals import master_score, earnings_revision as _ers_signal, quality as _qlt_signal
+from signals.regime import compute_from_bars as compute_regime
 from universe.screener import _FALLBACK_UNIVERSE
+from universe.ai_universe import AI_UNIVERSE, score as ai_score
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +104,12 @@ class BacktestEngine:
             "Downloading bars for %d symbols + SPY (%s → %s)...",
             len(universe), lookback_start, self.end_date,
         )
+        # AI names in the fallback universe already; RSP/QQQ/IWM needed for regime detection
+        _REGIME_EXTRAS = ["RSP", "QQQ", "IWM"]
         alpaca = AlpacaClient()
-        all_bars = alpaca.get_bars(universe + ["SPY"], start=lookback_start, end=self.end_date)
+        all_bars = alpaca.get_bars(
+            universe + ["SPY"] + _REGIME_EXTRAS, start=lookback_start, end=self.end_date
+        )
         logger.info("Downloaded %d bar rows", len(all_bars))
 
         # ── 2. Pre-load macro data (yfinance) ─────────────────────────────────
@@ -141,6 +147,8 @@ class BacktestEngine:
         rebalance_dates: list[date] = []
         positions_at_rebalance: list[int] = []
         sell_reason_counts: dict[str, int] = defaultdict(int)
+        current_regime: str = "factor"   # regime state carried across rebalances
+        regime_log: list[tuple] = []
 
         for i, d in enumerate(trading_dates):
             prices = _close_prices(all_bars, universe, d)
@@ -157,10 +165,16 @@ class BacktestEngine:
 
             # Rebalance gate
             if _should_rebalance(d, i, trading_dates, self.rebalance_freq):
+                regime_data = compute_regime(all_bars, d, previous_regime=current_regime)
+                current_regime = regime_data["regime"]
+                regime_log.append((d, current_regime, regime_data["composite_score"]))
+
                 signals = self._rebalance(
                     d, universe, portfolio, hist_alpaca, fmp, hist_macro, prices,
                     cached_ers_df=cached_ers_df, cached_qlt_df=cached_qlt_df,
                     cached_sector_map=cached_sector_map,
+                    regime=current_regime,
+                    all_bars=all_bars,
                 )
                 if signals is not None:
                     last_signals_df = signals
@@ -186,6 +200,13 @@ class BacktestEngine:
         result["avg_positions_post_rebalance"] = (
             round(sum(positions_at_rebalance) / len(positions_at_rebalance), 1)
             if positions_at_rebalance else 0
+        )
+        n_concentrated = sum(1 for _, r, _ in regime_log if r == "concentrated")
+        n_factor = len(regime_log) - n_concentrated
+        result["regime_log"] = [(str(d), r, s) for d, r, s in regime_log]
+        logger.info(
+            "Regime summary: %d concentrated rebalances / %d factor rebalances",
+            n_concentrated, n_factor,
         )
         return result
 
@@ -278,34 +299,46 @@ class BacktestEngine:
         cached_ers_df: pd.DataFrame | None = None,
         cached_qlt_df: pd.DataFrame | None = None,
         cached_sector_map: dict[str, str] | None = None,
+        regime: str = "factor",
+        all_bars: pd.DataFrame | None = None,
     ) -> pd.DataFrame | None:
+        cfg = get_settings()
         try:
-            with _no_store_writes():
-                ranked_df = master_score.compute(
-                    universe, alpaca=hist_alpaca, fmp=fmp, macro_client=hist_macro,
-                    cached_ers_df=cached_ers_df, cached_qlt_df=cached_qlt_df,
+            if regime == "concentrated" and all_bars is not None:
+                # ── Concentrated AI mode ─────────────────────────────────────
+                ai_df = ai_score(all_bars, d)
+                current_positions = hist_alpaca.get_positions()
+                target_weights = construct_concentrated(ai_df, current_positions, cfg)
+                _execute_rebalance(target_weights, portfolio, prices, d)
+                logger.info("REBALANCE %s | CONCENTRATED | target=%d", d, len(target_weights))
+                # Build a minimal signals_df so daily sell rules still work
+                return _minimal_signals_df(ai_df)
+
+            else:
+                # ── Factor mode ──────────────────────────────────────────────
+                with _no_store_writes():
+                    ranked_df = master_score.compute(
+                        universe, alpaca=hist_alpaca, fmp=fmp, macro_client=hist_macro,
+                        cached_ers_df=cached_ers_df, cached_qlt_df=cached_qlt_df,
+                    )
+
+                macro_val = (
+                    float(ranked_df["macro_alignment_score"].iloc[0])
+                    if not ranked_df.empty else 0.0
                 )
+                current_positions = hist_alpaca.get_positions()
+                target_weights = construct(
+                    ranked_df, current_positions,
+                    macro_score=macro_val, sector_map=cached_sector_map or {},
+                )
+                _execute_rebalance(target_weights, portfolio, prices, d)
 
-            macro_val = (
-                float(ranked_df["macro_alignment_score"].iloc[0])
-                if not ranked_df.empty else 0.0
-            )
-            current_positions = hist_alpaca.get_positions()
-            target_weights = construct(ranked_df, current_positions, macro_score=macro_val,
-                                       sector_map=cached_sector_map or {})
-
-            _execute_rebalance(target_weights, portfolio, prices, d)
-
-            n_pass = (
-                int(ranked_df["passes_filters"].sum())
-                if "passes_filters" in ranked_df.columns else 0
-            )
-            logger.info(
-                "REBALANCE %s | target=%d | pass_filters=%d | macro=%.1f",
-                d, len(target_weights), n_pass, macro_val,
-            )
-            # Return ranked_df with symbol as index so evaluate_risk can look up signals
-            return ranked_df
+                n_pass = int(ranked_df["passes_filters"].sum()) if "passes_filters" in ranked_df.columns else 0
+                logger.info(
+                    "REBALANCE %s | FACTOR | target=%d | pass_filters=%d | macro=%.1f",
+                    d, len(target_weights), n_pass, macro_val,
+                )
+                return ranked_df
 
         except Exception:
             logger.exception("Rebalance failed on %s", d)
@@ -428,6 +461,16 @@ def _spy_slice(bars: pd.DataFrame, start: date, end: date) -> pd.DataFrame | Non
         ]
     except KeyError:
         return None
+
+
+def _minimal_signals_df(ai_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a minimal signals DataFrame from AI scores so daily sell rules
+    have something to look up (RS/EPS revision checks will get None and skip).
+    """
+    if ai_df.empty:
+        return pd.DataFrame()
+    return ai_df.rename(columns={"ai_score": "master_score"})
 
 
 def _load_macro_data(start: date, end: date) -> dict[str, pd.DataFrame]:

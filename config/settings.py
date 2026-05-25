@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     max_holding_days: int = 40
     below_50dma_days: int = 2         # consecutive days below 50DMA → exit
 
+    # Concentrated AI regime portfolio
+    concentrated_n_positions: int = 7        # top N AI names when in concentrated mode
+    concentrated_max_position_pct: float = 0.22  # higher concentration allowed vs factor mode
+
     # Macro de-risking
     macro_derisking_threshold: float = 40.0  # go to cash if macro score < 40
     vix_threshold: float = 25.0

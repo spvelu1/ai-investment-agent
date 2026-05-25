@@ -11,10 +11,12 @@ from data.clients.alpaca_client import AlpacaClient
 from data.clients.fmp_client import FMPClient
 from data.clients.macro_client import MacroClient
 from data import store
-from portfolio.constructor import build_sector_map
+from portfolio.constructor import build_sector_map, construct_concentrated
 from portfolio.executor import Executor
 from portfolio.risk_manager import evaluate as evaluate_risk
 from signals import master_score
+from signals.regime import compute_live as compute_regime
+from universe.ai_universe import score_live as ai_score_live
 from universe.screener import get_eligible_universe
 
 logger = logging.getLogger(__name__)
@@ -78,20 +80,43 @@ def run_weekly_rebalance() -> None:
         logger.error("Empty universe — aborting rebalance")
         return
 
-    # Step 2: Compute MASTER_SCORE
-    ranked_df = master_score.compute(universe, alpaca=alpaca, fmp=fmp, macro_client=macro_client)
-    macro_score_val = float(ranked_df["macro_alignment_score"].iloc[0]) if not ranked_df.empty else 0.0
-
-    # Step 3: Persist signals
-    store.write_signals(ranked_df.reset_index(), signal_date=date.today())
+    # Step 2: Detect market regime (leading signal: 21d breadth + tech spread)
+    regime_data = compute_regime()
+    regime = regime_data["regime"]
+    logger.info(
+        "Regime: %s | composite=%.1f (breadth_21d=%.1f, tech_21d=%.1f)",
+        regime.upper(),
+        regime_data["composite_score"],
+        regime_data["breadth_spread_21d"],
+        regime_data["tech_spread_21d"],
+    )
 
     # Step 4: Get current positions
     current_positions = alpaca.get_positions()
 
-    # Step 5: Construct target portfolio
-    from portfolio.constructor import construct
-    sector_map = build_sector_map(universe, fmp)
-    target_weights = construct(ranked_df, current_positions, macro_score=macro_score_val, sector_map=sector_map)
+    if regime == "concentrated":
+        # ── Concentrated AI mode ─────────────────────────────────────────────
+        logger.info("Entering CONCENTRATED AI mode — scoring mega-cap tech universe")
+        ai_df = ai_score_live(alpaca)
+        if ai_df.empty:
+            logger.error("AI scoring failed — aborting rebalance")
+            return
+        target_weights = construct_concentrated(ai_df, current_positions, cfg)
+        ranked_df = ai_df.rename(columns={"ai_score": "master_score"})
+        macro_score_val = 100.0  # concentrated mode doesn't use macro gating
+    else:
+        # ── Factor mode ──────────────────────────────────────────────────────
+        logger.info("Entering FACTOR mode — running full MASTER_SCORE pipeline")
+        # Step 2b: Compute MASTER_SCORE
+        ranked_df = master_score.compute(universe, alpaca=alpaca, fmp=fmp, macro_client=macro_client)
+        macro_score_val = float(ranked_df["macro_alignment_score"].iloc[0]) if not ranked_df.empty else 0.0
+
+        # Step 3: Persist signals
+        store.write_signals(ranked_df.reset_index(), signal_date=date.today())
+
+        from portfolio.constructor import construct
+        sector_map = build_sector_map(universe, fmp)
+        target_weights = construct(ranked_df, current_positions, macro_score=macro_score_val, sector_map=sector_map)
 
     # Step 6: Execute
     executor = Executor(alpaca)
@@ -105,7 +130,8 @@ def run_weekly_rebalance() -> None:
     FMPClient.reset_daily_counter()
 
     logger.info(
-        "=== WEEKLY REBALANCE complete | %d target positions | macro=%.1f ===",
+        "=== WEEKLY REBALANCE complete | regime=%s | %d target positions | macro=%.1f ===",
+        regime.upper(),
         len(target_weights),
         macro_score_val,
     )
